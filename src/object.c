@@ -235,6 +235,7 @@ robj *createZsetZiplistObject(void) {
 }
 
 robj *createStreamObject(void) {
+	//创建一个stream结构，并且放到redis的通用robj里面
     stream *s = streamNew();
     robj *o = createObject(OBJ_STREAM,s);
     o->encoding = OBJ_ENCODING_STREAM;

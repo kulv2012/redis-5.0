@@ -50,6 +50,7 @@ size_t streamReplyWithRangeFromConsumerPEL(client *c, stream *s, streamID *start
 
 /* Create a new stream data structure. */
 stream *streamNew(void) {
+	//新建stream， cgroups暂时置空，需要的时候再分配内存
     stream *s = zmalloc(sizeof(*s));
     s->rax = raxNew();
     s->length = 0;
@@ -196,7 +197,7 @@ int streamAppendItem(stream *s, robj **argv, int64_t numfields, streamID *added_
     streamID id;
     if (use_id)
         id = *use_id;
-    else
+    else //生成一个新的id
         streamNextID(&s->last_id,&id);
 
     /* We have to add the key into the radix tree in lexicographic order,
@@ -334,6 +335,7 @@ int streamAppendItem(stream *s, robj **argv, int64_t numfields, streamID *added_
         lp = lpAppendInteger(lp,numfields);
     for (int64_t i = 0; i < numfields; i++) {
         sds field = argv[i*2]->ptr, value = argv[i*2+1]->ptr;
+		//如果没有找到同样的field列表，那么需要插入field部分的内容，否则只需要value了
         if (!(flags & STREAM_ITEM_FLAG_SAMEFIELDS))
             lp = lpAppend(lp,(unsigned char*)field,sdslen(field));
         lp = lpAppend(lp,(unsigned char*)value,sdslen(value));
@@ -352,6 +354,7 @@ int streamAppendItem(stream *s, robj **argv, int64_t numfields, streamID *added_
     raxInsert(s->rax,(unsigned char*)&rax_key,sizeof(rax_key),lp,NULL);
     s->length++;
     s->last_id = id;
+	//返回新插入的 id
     if (added_id) *added_id = id;
     return C_OK;
 }
@@ -1003,6 +1006,7 @@ size_t streamReplyWithRangeFromConsumerPEL(client *c, stream *s, streamID *start
 robj *streamTypeLookupWriteOrCreate(client *c, robj *key) {
     robj *o = lookupKeyWrite(c->db,key);
     if (o == NULL) {
+		//不存在，创建一个stream结构
         o = createStreamObject();
         dbAdd(c->db,key,o);
     } else {
@@ -1089,6 +1093,7 @@ void xaddCommand(client *c) {
     /* Parse options. */
     int i = 2; /* This is the first argument position where we could
                   find an option, or the ID. */
+	//检查MAXLEN参数，ID参数，设置标记变量和id， maxlen值，如果指定了的话
     for (; i < c->argc; i++) {
         int moreargs = (c->argc-1) - i; /* Number of additional arguments. */
         char *opt = c->argv[i]->ptr;
@@ -1125,10 +1130,12 @@ void xaddCommand(client *c) {
     /* Lookup the stream at key. */
     robj *o;
     stream *s;
+	//查询到对应stream名的robj结构，从中获取stream结构. 如果stream不存在，会创建之
     if ((o = streamTypeLookupWriteOrCreate(c,c->argv[1])) == NULL) return;
     s = o->ptr;
 
     /* Append using the low level function and return the ID. */
+	//将后面的参数写入stream中
     if (streamAppendItem(s,c->argv+field_pos,(c->argc-field_pos)/2,
         &id, id_given ? &id : NULL)
         == C_ERR)
@@ -1137,8 +1144,10 @@ void xaddCommand(client *c) {
                         "target stream top item");
         return;
     }
+	//返回结果
     addReplyStreamID(c,&id);
 
+	//常规任务处理，标记修改次数等
     signalModifiedKey(c->db,c->argv[1]);
     notifyKeyspaceEvent(NOTIFY_STREAM,"xadd",c->argv[1],c->db->id);
     server.dirty++;
@@ -1159,6 +1168,8 @@ void xaddCommand(client *c) {
 
     /* Let's rewrite the ID argument with the one actually generated for
      * AOF/replication propagation. */
+	//重写一下对应的id字段，redis的上层调用函数会把这条指令propgate广播到从库，
+	//如果从库也都自动创建id，那时间戳就不一样了，所以这里直接修改上层使用的参数了
     robj *idarg = createObjectFromStreamID(&id);
     rewriteClientCommandArgument(c,i,idarg);
     decrRefCount(idarg);
