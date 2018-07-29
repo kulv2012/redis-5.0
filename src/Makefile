@@ -24,7 +24,7 @@ STD=-std=c99 -pedantic -DREDIS_STATIC=''
 WARN=-Wall -W -Wno-missing-field-initializers
 OPT=$(OPTIMIZATION)
 
-PREFIX?=/usr/local
+PREFIX?=/home/wuhaiwen/redis50
 INSTALL_BIN=$(PREFIX)/bin
 INSTALL=install
 
