@@ -154,6 +154,7 @@ raxNode *raxNewNode(size_t children, int datafield) {
 /* Allocate a new rax and return its pointer. On out of memory the function
  * returns NULL. */
 rax *raxNew(void) {
+	//新建一个基数树 结构，Redis用这个来压缩字符串
     rax *rax = rax_malloc(sizeof(*rax));
     if (rax == NULL) return NULL;
     rax->numele = 0;
@@ -1167,6 +1168,7 @@ void raxStart(raxIterator *it, rax *rt) {
     it->key = it->key_static_string;
     it->key_max = RAX_ITER_STATIC_LEN;
     it->data = NULL;
+	//初始化stack指针对账
     raxStackInit(&it->stack);
 }
 

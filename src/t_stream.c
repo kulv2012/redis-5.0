@@ -248,7 +248,9 @@ int streamAppendItem(stream *s, robj **argv, int64_t numfields, streamID *added_
             lp = NULL;
         } else if (server.stream_node_max_entries) {
             int64_t count = lpGetInteger(lpFirst(lp));
-            if (count > server.stream_node_max_entries) lp = NULL;
+            if (count > server.stream_node_max_entries) {
+				lp = NULL;
+			}
         }
     }
 
@@ -271,6 +273,7 @@ int streamAppendItem(stream *s, robj **argv, int64_t numfields, streamID *added_
          * master entry. */
         flags |= STREAM_ITEM_FLAG_SAMEFIELDS;
     } else {
+		//比较master_id的fields列表跟当前的是不是一样，如果是一样，设置标记flags |= STREAM_ITEM_FLAG_SAMEFIELDS
         serverAssert(ri.key_len == sizeof(rax_key));
         memcpy(rax_key,ri.key,sizeof(rax_key));
 
@@ -305,6 +308,8 @@ int streamAppendItem(stream *s, robj **argv, int64_t numfields, streamID *added_
             if (i == master_fields_count) flags |= STREAM_ITEM_FLAG_SAMEFIELDS;
         }
     }
+	
+	//下面开始拼装listpack部分的串内容，最后调用raxInsert 插入到rax树里面
 
     /* Populate the listpack with the new entry. We use the following
      * encoding:
@@ -331,7 +336,7 @@ int streamAppendItem(stream *s, robj **argv, int64_t numfields, streamID *added_
     lp = lpAppendInteger(lp,flags);
     lp = lpAppendInteger(lp,id.ms - master_id.ms);
     lp = lpAppendInteger(lp,id.seq - master_id.seq);
-    if (!(flags & STREAM_ITEM_FLAG_SAMEFIELDS))
+    if (!(flags & STREAM_ITEM_FLAG_SAMEFIELDS))//没有相同的fields，需要插入后面的fields数目，否则不需要了
         lp = lpAppendInteger(lp,numfields);
     for (int64_t i = 0; i < numfields; i++) {
         sds field = argv[i*2]->ptr, value = argv[i*2+1]->ptr;
@@ -341,6 +346,8 @@ int streamAppendItem(stream *s, robj **argv, int64_t numfields, streamID *added_
         lp = lpAppend(lp,(unsigned char*)value,sdslen(value));
     }
     /* Compute and store the lp-count field. */
+	
+	//lp_count 是总共有多少个字符串部分，总共的
     int64_t lp_count = numfields;
     lp_count += 3; /* Add the 3 fixed fields flags + ms-diff + seq-diff. */
     if (!(flags & STREAM_ITEM_FLAG_SAMEFIELDS)) {
@@ -490,6 +497,7 @@ int64_t streamTrimByLength(stream *s, size_t maxlen, int approx) {
 void streamIteratorStart(streamIterator *si, stream *s, streamID *start, streamID *end, int rev) {
     /* Intialize the iterator and translates the iteration start/stop
      * elements into a 128 big big-endian number. */
+	//设置开始节点到迭代器里面
     if (start) {
         streamEncodeID(si->start_key,start);
     } else {
@@ -497,6 +505,7 @@ void streamIteratorStart(streamIterator *si, stream *s, streamID *start, streamI
         si->start_key[0] = 0;
     }
 
+	//设置结束节点到迭代器里面
     if (end) {
         streamEncodeID(si->end_key,end);
     } else {
@@ -505,24 +514,28 @@ void streamIteratorStart(streamIterator *si, stream *s, streamID *start, streamI
     }
 
     /* Seek the correct node in the radix tree. */
+	//迭代器指向开头，然后找到start_key的位置
     raxStart(&si->ri,s->rax);
     if (!rev) {
         if (start && (start->ms || start->seq)) {
-            raxSeek(&si->ri,"<=",(unsigned char*)si->start_key,
-                    sizeof(si->start_key));
-            if (raxEOF(&si->ri)) raxSeek(&si->ri,"^",NULL,0);
+            raxSeek(&si->ri,"<=",(unsigned char*)si->start_key, sizeof(si->start_key) );
+            if (raxEOF(&si->ri)){//移动到开头
+				raxSeek(&si->ri,"^",NULL,0);
+			}
         } else {
             raxSeek(&si->ri,"^",NULL,0);
         }
     } else {
         if (end && (end->ms || end->seq)) {
-            raxSeek(&si->ri,"<=",(unsigned char*)si->end_key,
-                    sizeof(si->end_key));
-            if (raxEOF(&si->ri)) raxSeek(&si->ri,"$",NULL,0);
+            raxSeek(&si->ri,"<=",(unsigned char*)si->end_key, sizeof(si->end_key));
+            if (raxEOF(&si->ri)){//移动到最后
+				raxSeek(&si->ri,"$",NULL,0);
+			}
         } else {
             raxSeek(&si->ri,"$",NULL,0);
         }
     }
+	//我所属的stream
     si->stream = s;
     si->lp = NULL; /* There is no current listpack right now. */
     si->lp_ele = NULL; /* Current listpack cursor. */
@@ -868,8 +881,10 @@ size_t streamReplyWithRange(client *c, stream *s, streamID *start, streamID *end
                                                    consumer);
     }
 
-    if (!(flags & STREAM_RWR_RAWENTRIES))
+    if (!(flags & STREAM_RWR_RAWENTRIES)){
         arraylen_ptr = addDeferredMultiBulkLength(c);
+	}
+	//移动到start end开始的位置，如果是反向就在最后，否则在start位置
     streamIteratorStart(&si,s,start,end,rev);
     while(streamIteratorGetID(&si,&id,&numfields)) {
         /* Update the group last_id if needed. */
@@ -878,7 +893,7 @@ size_t streamReplyWithRange(client *c, stream *s, streamID *start, streamID *end
 
         /* Emit a two elements array for each item. The first is
          * the ID, the second is an array of field-value pairs. */
-        addReplyMultiBulkLen(c,2);
+        addReplyMultiBulkLen(c,2);//返回返回的数据，2段，一个id,一个还是个数组
         addReplyStreamID(c,&id);
         addReplyMultiBulkLen(c,numfields*2);
 
@@ -1135,7 +1150,7 @@ void xaddCommand(client *c) {
     s = o->ptr;
 
     /* Append using the low level function and return the ID. */
-	//将后面的参数写入stream中
+	//将后面的参数写入stream中,  stream使用rax树来组织的，然后 每个rax树里面的节点使用listpack列表来组织的，后者又有压缩在里面
     if (streamAppendItem(s,c->argv+field_pos,(c->argc-field_pos)/2,
         &id, id_given ? &id : NULL)
         == C_ERR)
@@ -1176,6 +1191,7 @@ void xaddCommand(client *c) {
 
     /* We need to signal to blocked clients that there is new data on this
      * stream. */
+	//通知等待在这个key上面的客户端，给他们新的内容
     if (server.blocked_clients_by_type[BLOCKED_STREAM])
         signalKeyAsReady(c->db, c->argv[1]);
 }
@@ -1262,8 +1278,7 @@ void xreadCommand(client *c) {
         char *o = c->argv[i]->ptr;
         if (!strcasecmp(o,"BLOCK") && moreargs) {
             i++;
-            if (getTimeoutFromObjectOrReply(c,c->argv[i],&timeout,
-                UNIT_MILLISECONDS) != C_OK) return;
+            if (getTimeoutFromObjectOrReply(c,c->argv[i],&timeout,  UNIT_MILLISECONDS) != C_OK) return;
         } else if (!strcasecmp(o,"COUNT") && moreargs) {
             i++;
             if (getLongLongFromObjectOrReply(c,c->argv[i],&count,NULL) != C_OK)
@@ -1408,6 +1423,7 @@ void xreadCommand(client *c) {
         goto cleanup;
     }
 
+	//还没有读满，需要继续等待
     /* Block if needed. */
     if (timeout != -1) {
         /* If we are inside a MULTI/EXEC and the list is empty the only thing
@@ -1416,8 +1432,9 @@ void xreadCommand(client *c) {
             addReply(c,shared.nullmultibulk);
             goto cleanup;
         }
-        blockForKeys(c, BLOCKED_STREAM, c->argv+streams_arg, streams_count,
-                     timeout, NULL, ids);
+		//登记这个客户端到每个等待的key的block列表里面 ， 
+		//等有新事件发生的时候，xadd会调用 signalKeyAsReady 来找一个对应的客户端然后通知他的
+        blockForKeys(c, BLOCKED_STREAM, c->argv+streams_arg, streams_count, timeout, NULL, ids);
         /* If no COUNT is given and we block, set a relatively small count:
          * in case the ID provided is too low, we do not want the server to
          * block just to serve this client a huge stream of messages. */

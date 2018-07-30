@@ -27,13 +27,17 @@ typedef struct stream {
  * rewriting code that also needs to iterate the stream to emit the XADD
  * commands. */
 typedef struct streamIterator {
+	//我所属的stream
     stream *stream;         /* The stream we are iterating. */
     streamID master_id;     /* ID of the master entry at listpack head. */
     uint64_t master_fields_count;       /* Master entries # of fields. */
     unsigned char *master_fields_start; /* Master entries start in listpack. */
     unsigned char *master_fields_ptr;   /* Master field to emit next. */
     int entry_flags;                    /* Flags of entry we are emitting. */
+	//这个迭代器的方向，如果为0代表正向
     int rev;                /* True if iterating end to start (reverse). */
+	
+	//迭代器的开始结束位置
     uint64_t start_key[2];  /* Start key as 128 bit big endian. */
     uint64_t end_key[2];    /* End key as 128 bit big endian. */
     raxIterator ri;         /* Rax iterator. */

@@ -100,8 +100,9 @@ int getTimeoutFromObjectOrReply(client *c, robj *object, mstime_t *timeout, int 
  * flag is set client query buffer is not longer processed, but accumulated,
  * and will be processed when the client is unblocked. */
 void blockClient(client *c, int btype) {
+	//将客户端设置为blocked状态，然后统计信息
     c->flags |= CLIENT_BLOCKED;
-    c->btype = btype;
+    c->btype = btype;//等在那种类型上面
     server.blocked_clients++;
     server.blocked_clients_by_type[btype]++;
 }
@@ -489,6 +490,7 @@ void blockForKeys(client *c, int btype, robj **keys, int numkeys, mstime_t timeo
         /* And in the other "side", to map keys -> clients */
         de = dictFind(c->db->blocking_keys,keys[j]);
         if (de == NULL) {
+			//新建一个列表给这个key来存clients
             int retval;
 
             /* For every key we take a list of clients blocked for it */
@@ -499,6 +501,7 @@ void blockForKeys(client *c, int btype, robj **keys, int numkeys, mstime_t timeo
         } else {
             l = dictGetVal(de);
         }
+		//将这个clients加到这list后面
         listAddNodeTail(l,c);
     }
     blockClient(c,btype);
