@@ -16,7 +16,9 @@ typedef struct streamID {
 typedef struct stream {
     rax *rax;               /* The radix tree holding the stream. */
     uint64_t length;        /* Number of elements inside this stream. */
+	//当前stream的最后一个id
     streamID last_id;       /* Zero if there are yet no items. */
+	//这个stream有哪些group, group里面会存储对应的有哪些consumers
     rax *cgroups;           /* Consumer groups dictionary: name -> streamCG */
 } stream;
 
@@ -53,15 +55,18 @@ typedef struct streamIterator {
 
 /* Consumer group. */
 typedef struct streamCG {
+	//当前我这个stream的最大id
     streamID last_id;       /* Last delivered (not acknowledged) ID for this
                                group. Consumers that will just ask for more
                                messages will served with IDs > than this. */
+	//还没有收到ACK的消息列表
     rax *pel;               /* Pending entries list. This is a radix tree that
                                has every message delivered to consumers (without
                                the NOACK option) that was yet not acknowledged
                                as processed. The key of the radix tree is the
                                ID as a 64 bit big endian number, while the
                                associated value is a streamNACK structure.*/
+	//这个group里面对一个的consumers有哪些, 后者类型为 streamConsumer 
     rax *consumers;         /* A radix tree representing the consumers by name
                                and their associated representation in the form
                                of streamConsumer structures. */

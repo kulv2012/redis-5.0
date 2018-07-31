@@ -466,11 +466,14 @@ void blockForKeys(client *c, int btype, robj **keys, int numkeys, mstime_t timeo
     list *l;
     int j;
 
+	//timeout是绝对时间
     c->bpop.timeout = timeout;
     c->bpop.target = target;
 
     if (target != NULL) incrRefCount(target);
 
+	//遍历每一个keys, 将其加入到客户端的bpop.keys里面,
+	//然后将这个客户端connection加入到c->db->blocking_keys 的对应的key 的客户端列表里面
     for (j = 0; j < numkeys; j++) {
         /* The value associated with the key name in the bpop.keys dictionary
          * is NULL for lists and sorted sets, or the stream ID for streams. */
@@ -480,6 +483,8 @@ void blockForKeys(client *c, int btype, robj **keys, int numkeys, mstime_t timeo
             memcpy(key_data,ids+j,sizeof(streamID));
         }
 
+		//每个客户端的bpop结构里面记录了我都阻塞在了哪些key里面，如果已经有等级信息了，后面就不需要处理了
+		//这样能知道客户端阻塞的key列表,  如果是stream 还需要记录对应的id位置 
         /* If the key already exists in the dictionary ignore it. */
         if (dictAdd(c->bpop.keys,keys[j],key_data) != DICT_OK) {
             zfree(key_data);
@@ -487,6 +492,8 @@ void blockForKeys(client *c, int btype, robj **keys, int numkeys, mstime_t timeo
         }
         incrRefCount(keys[j]);
 
+		//然后还需要记录这个db的所有阻塞的key 对应的客户端列表，这样用来做唤醒用的，
+		//这才是最重要的结构
         /* And in the other "side", to map keys -> clients */
         de = dictFind(c->db->blocking_keys,keys[j]);
         if (de == NULL) {
@@ -504,6 +511,9 @@ void blockForKeys(client *c, int btype, robj **keys, int numkeys, mstime_t timeo
 		//将这个clients加到这list后面
         listAddNodeTail(l,c);
     }
+	//真正的阻塞操作其实就是将客户端设置为blocked状态，然后统计信息
+	//其他没什么区别，可能就是不接受客户端请求而已
+	//所以可以看到，阻塞的实现方式就是，登记客户端阻塞的key以及信息，然后等级某个key上面有哪些客户端在等待
     blockClient(c,btype);
 }
 

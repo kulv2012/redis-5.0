@@ -862,6 +862,7 @@ void streamPropagateXCLAIM(client *c, robj *key, robj *group, robj *id, streamNA
 #define STREAM_RWR_RAWENTRIES (1<<1)    /* Do not emit protocol for array
                                            boundaries, just the entries. */
 size_t streamReplyWithRange(client *c, stream *s, streamID *start, streamID *end, size_t count, int rev, streamCG *group, streamConsumer *consumer, int flags, streamPropInfo *spi) {
+	//根据group和consumer参数，读取start到end的最多count个元素，可以反向读取
     void *arraylen_ptr = NULL;
     size_t arraylen = 0;
     streamIterator si;
@@ -1259,6 +1260,7 @@ void xlenCommand(client *c) {
  * on slaves, XREAD-GROUP is not. */
 #define XREAD_BLOCKED_DEFAULT_COUNT 1000
 void xreadCommand(client *c) {
+	//xread 和 xreadgroup 都是这个函数, 可以阻塞读取某个stream内容
     long long timeout = -1; /* -1 means, no BLOCK argument given. */
     long long count = 0;
     int streams_count = 0;
@@ -1286,7 +1288,7 @@ void xreadCommand(client *c) {
             if (count < 0) count = 0;
         } else if (!strcasecmp(o,"STREAMS") && moreargs) {
             streams_arg = i+1;
-            streams_count = (c->argc-streams_arg);
+            streams_count = (c->argc - streams_arg);
             if ((streams_count % 2) != 0) {
                 addReplyError(c,"Unbalanced XREAD list of streams: "
                                 "for each stream key an ID or '$' must be "
@@ -1301,6 +1303,7 @@ void xreadCommand(client *c) {
                                 "XREADGROUP. You called XREAD instead.");
                 return;
             }
+			
             groupname = c->argv[i+1];
             consumername = c->argv[i+2];
             i += 2;
@@ -1331,45 +1334,55 @@ void xreadCommand(client *c) {
     }
 
     /* Parse the IDs and resolve the group name. */
+	//默认用静态变量，能存8个stream，这样免得每次申请，但是这样有限制，
+	//就是必须每次都用完了再处理下面的请求，不能复用和串
     if (streams_count > STREAMID_STATIC_VECTOR_LEN)
         ids = zmalloc(sizeof(streamID)*streams_count);
+	//如果指定了group，需要为每个stream申请衣蛾streamCG结构
     if (groupname) groups = zmalloc(sizeof(streamCG*)*streams_count);
 
+	//循环遍历所有的stream 名字和后面的id字段，进行stream存在性和group存在性检查
+	//同时会根据ID来设置对应stream ids的读取起始位置
     for (int i = streams_arg + streams_count; i < c->argc; i++) {
+		//i指向遍历的后面的id部分
         /* Specifying "$" as last-known-id means that the client wants to be
          * served with just the messages that will arrive into the stream
          * starting from now. */
+		//id_idx 是后面的每个stream对应的开始ID， 第几个stream的id
         int id_idx = i - streams_arg - streams_count;
+		//key是对应i的stream位置
         robj *key = c->argv[i-streams_count];
-        robj *o = lookupKeyRead(c->db,key);
+        robj *o = lookupKeyRead(c->db,key); //查到对应stream结构
         if (o && checkType(c,o,OBJ_STREAM)) goto cleanup;
         streamCG *group = NULL;
 
         /* If a group was specified, than we need to be sure that the
          * key and group actually exist. */
         if (groupname) {
-            if (o == NULL ||
-                (group = streamLookupCG(o->ptr,groupname->ptr)) == NULL)
-            {
+            if (o == NULL || (group = streamLookupCG(o->ptr,groupname->ptr)) == NULL)
+            { //指定了群组，并且stream不存在，或者stream对应的groupname不存在，报错
+				//所以这里有意思，read的时候，如果是readgroup， 那么所哟的stream必须存在，否则单纯的read时stream可以不存在
                 addReplyErrorFormat(c, "-NOGROUP No such key '%s' or consumer "
                                        "group '%s' in XREADGROUP with GROUP "
                                        "option",
                                     (char*)key->ptr,(char*)groupname->ptr);
                 goto cleanup;
             }
+			//记录对应的group，也就是对应stream的某个消费组
             groups[id_idx] = group;
         }
 
         if (strcmp(c->argv[i]->ptr,"$") == 0) {
             if (o) {
                 stream *s = o->ptr;
-                ids[id_idx] = s->last_id;
+                ids[id_idx] = s->last_id; //指定的是$， 那么就设置为当前stream的最后一个id
             } else {
-                ids[id_idx].ms = 0;
+                ids[id_idx].ms = 0; //如果这个stream不存在，就为0，什么都要
                 ids[id_idx].seq = 0;
             }
             continue;
         } else if (strcmp(c->argv[i]->ptr,">") == 0) {
+			//从本群的最后一个开始,
             if (!xreadgroup || groupname == NULL) {
                 addReplyError(c,"The > ID can be specified only when calling "
                                 "XREADGROUP using the GROUP <group> "
@@ -1386,30 +1399,39 @@ void xreadCommand(client *c) {
     /* Try to serve the client synchronously. */
     size_t arraylen = 0;
     void *arraylen_ptr = NULL;
+	//遍历每一个stream, 每个stream都最多读取 count个元素
     for (int i = 0; i < streams_count; i++) {
+		//先找到对应stream的结构，然后看对应的stream的最大的id是否比参数里的id要大，
+		//如果是，就有内容，否则没有新的内容，直接跳过继续
         robj *o = lookupKeyRead(c->db,c->argv[streams_arg+i]);
         if (o == NULL) continue;
         stream *s = o->ptr;
         streamID *gt = ids+i; /* ID must be greater than this. */
         if (s->last_id.ms > gt->ms ||
             (s->last_id.ms == gt->ms && s->last_id.seq > gt->seq))
-        {
+        {//当前stream的最大id要大于参数的最大id，有心内容
             arraylen++;
             if (arraylen == 1) arraylen_ptr = addDeferredMultiBulkLength(c);
             /* streamReplyWithRange() handles the 'start' ID as inclusive,
              * so start from the next ID, since we want only messages with
              * IDs greater than start. */
-            streamID start = *gt;
+            streamID start = *gt;//这是开始位置
             start.seq++; /* uint64_t can't overflow in this context. */
 
             /* Emit the two elements sub-array consisting of the name
              * of the stream and the data we extracted from it. */
+
+			//组成返回数据结构，bulk
             addReplyMultiBulkLen(c,2);
             addReplyBulk(c,c->argv[streams_arg+i]);
             streamConsumer *consumer = NULL;
-            if (groups) consumer = streamLookupConsumer(groups[i],
-                                                        consumername->ptr,1);
-            streamPropInfo spi = {c->argv[i+streams_arg],groupname};
+            if (groups){
+				//查找这个group里面的consumer, 根据参数的consumername ， 如果没有，就会默认创建一个
+				consumer = streamLookupConsumer(groups[i], consumername->ptr,1);
+			}
+            streamPropInfo spi = {c->argv[i+streams_arg], groupname};
+
+			//传入group消费组和消费者id， 读取start开始的count个元素, 放到client的发送缓冲区里面
             streamReplyWithRange(c,s,&start,NULL,count,0,
                                  groups ? groups[i] : NULL,
                                  consumer, noack, &spi);
@@ -1418,6 +1440,8 @@ void xreadCommand(client *c) {
     }
 
      /* We replied synchronously! Set the top array len and return to caller. */
+	//只要成功读取到了内容，就不用等待，因此这里的意思是，只要读取到了一条 就不等待，而不是读取到count条就等待
+	//这个一定要注意，不是读取满count条, 而是只要有一条就返回
     if (arraylen) {
         setDeferredMultiBulkLength(c,arraylen_ptr,arraylen);
         goto cleanup;
@@ -1465,6 +1489,7 @@ cleanup: /* Cleanup. */
 
     /* The command is propagated (in the READGROUP form) as a side effect
      * of calling lower level APIs. So stop any implicit propagation. */
+	//特殊处理，这种请求不能同步到从库，不过这样的话群组里面的消费者id列表就没有同步了，主库是有写入cg->consumers的
     preventCommandPropagation(c);
     if (ids != static_ids) zfree(ids);
     zfree(groups);
@@ -1529,6 +1554,7 @@ void streamFreeCG(streamCG *cg) {
 /* Lookup the consumer group in the specified stream and returns its
  * pointer, otherwise if there is no such group, NULL is returned. */
 streamCG *streamLookupCG(stream *s, sds groupname) {
+	//查找某个stream对应的group，看存不存在，group需要显示创建，不能默认创建
     if (s->cgroups == NULL) return NULL;
     streamCG *cg = raxFind(s->cgroups,(unsigned char*)groupname,
                            sdslen(groupname));
@@ -1540,6 +1566,8 @@ streamCG *streamLookupCG(stream *s, sds groupname) {
  * of calling this function, otherwise its last seen time is updated and
  * the existing consumer reference returned. */
 streamConsumer *streamLookupConsumer(streamCG *cg, sds name, int create) {
+	//查找这个group里面的consumer, 根据参数的consumername ， 如果没有，就会默认创建一个
+	//group对应的consumers列表放在cg->consumers 的rax树里面 
     streamConsumer *consumer = raxFind(cg->consumers,(unsigned char*)name,
                                sdslen(name));
     if (consumer == raxNotFound) {
@@ -1547,6 +1575,8 @@ streamConsumer *streamLookupConsumer(streamCG *cg, sds name, int create) {
         consumer = zmalloc(sizeof(*consumer));
         consumer->name = sdsdup(name);
         consumer->pel = raxNew();
+
+		//group对应的consumer列表放在rax树里面
         raxInsert(cg->consumers,(unsigned char*)name,sdslen(name),
                   consumer,NULL);
     }
