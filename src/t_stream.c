@@ -381,6 +381,7 @@ int streamAppendItem(stream *s, robj **argv, int64_t numfields, streamID *added_
  *    to be deleted, leaving the stream with a number of elements >= maxlen.
  */
 int64_t streamTrimByLength(stream *s, size_t maxlen, int approx) {
+	// xtrimCommand 或者xadd 调用这里来清楚一些流的元素
     if (s->length <= maxlen) return 0;
 
     raxIterator ri;
@@ -755,6 +756,7 @@ void streamIteratorStop(streamIterator *si) {
 /* Delete the specified item ID from the stream, returning 1 if the item
  * was deleted 0 otherwise (if it does not exist). */
 int streamDeleteItem(stream *s, streamID *id) {
+	//xdelCommand 调用这里，来删除一个stream的某条消息
     int deleted = 0;
     streamIterator si;
     streamIteratorStart(&si,s,id,id,0);
@@ -1199,6 +1201,7 @@ void xaddCommand(client *c) {
 
 /* XRANGE/XREVRANGE actual implementation. */
 void xrangeGenericCommand(client *c, int rev) {
+	//读取某一段消息
     robj *o;
     stream *s;
     streamID startid, endid;
@@ -1521,6 +1524,7 @@ void streamFreeNACK(streamNACK *na) {
  * to delete a consumer, and not when the whole stream is destroyed, the caller
  * should do some work before. */
 void streamFreeConsumer(streamConsumer *sc) {
+	//清空一个消费者结构 删除消费者或者群会调用到
     raxFree(sc->pel); /* No value free callback: the PEL entries are shared
                          between the consumer and the main stream PEL. */
     sdsfree(sc->name);
@@ -1532,21 +1536,28 @@ void streamFreeConsumer(streamConsumer *sc) {
  * already existed NULL is returned, otherwise the pointer to the consumer
  * group is returned. */
 streamCG *streamCreateCG(stream *s, char *name, size_t namelen, streamID *id) {
+	//给stream创建一个group， "XGROUP CREATE <key> <groupname> <id or $>" 命令调用这里
     if (s->cgroups == NULL) s->cgroups = raxNew();
+	//如果已经存在了就直接返回空，否则返回streamCG 指针
     if (raxFind(s->cgroups,(unsigned char*)name,namelen) != raxNotFound)
         return NULL;
 
+	//初始化成员，last_id 是初始化的ID
     streamCG *cg = zmalloc(sizeof(*cg));
     cg->pel = raxNew();
-    cg->consumers = raxNew();
+    cg->consumers = raxNew();//消费者列表
     cg->last_id = *id;
+	//插入rax树
     raxInsert(s->cgroups,(unsigned char*)name,namelen,cg,NULL);
     return cg;
 }
 
 /* Free a consumer group and all its associated data. */
 void streamFreeCG(streamCG *cg) {
+	//XGROUP DESTROY 调用这里来清空group的信息， 清楚待ACK队列  和 消费者列表。
     raxFreeWithCallback(cg->pel,(void(*)(void*))streamFreeNACK);
+
+	//下面只需要对每个消费者调用streamFreeConsumer 清空元数据就可以了，因为上面的streamFreeNACK 以及清空了对应的消息内容了的
     raxFreeWithCallback(cg->consumers,(void(*)(void*))streamFreeConsumer);
     zfree(cg);
 }
@@ -1588,9 +1599,12 @@ streamConsumer *streamLookupConsumer(streamCG *cg, sds name, int create) {
  * may have pending messages: they are removed from the PEL, and the number
  * of pending messages "lost" is returned. */
 uint64_t streamDelConsumer(streamCG *cg, sds name) {
+	//删除某个消费者，然后返回待ACK的消息数目给客户端
+	//注意这里只是删除某个消费者，那么，
     streamConsumer *consumer = streamLookupConsumer(cg,name,0);
     if (consumer == NULL) return 0;
 
+	//还没有收到ACK的消息数
     uint64_t retval = raxSize(consumer->pel);
 
     /* Iterate all the consumer pending messages, deleting every corresponding
@@ -1598,15 +1612,21 @@ uint64_t streamDelConsumer(streamCG *cg, sds name) {
     raxIterator ri;
     raxStart(&ri,consumer->pel);
     raxSeek(&ri,"^",NULL,0);
+	//扫描消费者的待ACK队列，然后一个个删除他们在group->pel的内容， 然后清空这个消息
+	//所以这里跟清空一个group不太一样，流程不一样 , 
+	//删除group可以只需要传入streamFreeNACK 来删除对应结构的内容；
+	//但是删除消费者需要删除对应消费者自己的pel和group里面的pel，以及对应的消息内容
     while(raxNext(&ri)) {
         streamNACK *nack = ri.data;
         raxRemove(cg->pel,ri.key,ri.key_len,NULL);
+		//一个个释放pel里面的内容
         streamFreeNACK(nack);
     }
     raxStop(&ri);
 
     /* Deallocate the consumer. */
     raxRemove(cg->consumers,(unsigned char*)name,sdslen(name),NULL);
+	//清空这个客户端结构的pel列表等，里面的消息会一个个清空
     streamFreeConsumer(consumer);
     return retval;
 }
@@ -1620,6 +1640,7 @@ uint64_t streamDelConsumer(streamCG *cg, sds name) {
  * XGROUP DESTROY <key> <groupname>
  * XGROUP DELCONSUMER <key> <groupname> <consumername> */
 void xgroupCommand(client *c) {
+	//group管理，增删改id， 还可以删除某个consumer
     const char *help[] = {
 "CREATE      <key> <groupname> <id or $>  -- Create a new consumer group.",
 "SETID       <key> <groupname> <id or $>  -- Set the current group ID.",
@@ -1635,6 +1656,7 @@ NULL
 
     /* Lookup the key now, this is common for all the subcommands but HELP. */
     if (c->argc >= 4) {
+		//检查stream key在不在，里面有没有对应的groupname， 如果是修改删除操作的话
         robj *o = lookupKeyWriteOrReply(c,c->argv[2],shared.nokeyerr);
         if (o == NULL || checkType(c,o,OBJ_STREAM)) return;
         s = o->ptr;
@@ -1654,12 +1676,14 @@ NULL
 
     /* Dispatch the different subcommands. */
     if (!strcasecmp(opt,"CREATE") && c->argc == 5) {
+		//给某个stream增加一个group， 先处理id的事情
         streamID id;
         if (!strcmp(c->argv[4]->ptr,"$")) {
             id = s->last_id;
         } else if (streamParseIDOrReply(c,c->argv[4],&id,0) != C_OK) {
             return;
         }
+		//检查有没有存在grpname的组，如果没有就创建他
         streamCG *cg = streamCreateCG(s,grpname,sdslen(grpname),&id);
         if (cg) {
             addReply(c,shared.ok);
@@ -1677,12 +1701,14 @@ NULL
         } else if (streamParseIDOrReply(c,c->argv[4],&id,0) != C_OK) {
             return;
         }
+		//直接改id
         cg->last_id = id;
         addReply(c,shared.ok);
         server.dirty++;
         notifyKeyspaceEvent(NOTIFY_STREAM,"xgroup-setid",c->argv[2],c->db->id);
     } else if (!strcasecmp(opt,"DESTROY") && c->argc == 4) {
         if (cg) {
+			//从stream的cgroups 列表移除， 然后还需要清理相关的内容。比如group里面的各种队列，以及其消费者列表
             raxRemove(s->cgroups,(unsigned char*)grpname,sdslen(grpname),NULL);
             streamFreeCG(cg);
             addReply(c,shared.cone);
@@ -1695,6 +1721,7 @@ NULL
     } else if (!strcasecmp(opt,"DELCONSUMER") && c->argc == 5) {
         /* Delete the consumer and returns the number of pending messages
          * that were yet associated with such a consumer. */
+	//删除某个消费者，然后返回待ACK的消息数目给客户端
         long long pending = streamDelConsumer(cg,c->argv[4]->ptr);
         addReplyLongLong(c,pending);
         server.dirty++;
@@ -1717,10 +1744,13 @@ NULL
  * acknowledged, that is, the IDs we were actually able to resolve in the PEL.
  */
 void xackCommand(client *c) {
+	//客户端告诉Redis标记某条消息到达了
     streamCG *group = NULL;
+	//先找到对应的消息stream
     robj *o = lookupKeyRead(c->db,c->argv[1]);
     if (o) {
         if (checkType(c,o,OBJ_STREAM)) return; /* Type error. */
+		//group也是强制的, 也就是说，ack是针对group的，而不是stream的
         group = streamLookupCG(o->ptr,c->argv[2]->ptr);
     }
 
@@ -1740,6 +1770,9 @@ void xackCommand(client *c) {
         /* Lookup the ID in the group PEL: it will have a reference to the
          * NACK structure that will have a reference to the consumer, so that
          * we are able to remove the entry from both PELs. */
+
+		//ACK可以由另外的客户端发起，就是说可以ACK别的客户端的ID，挺奇怪的这个
+		//先找到对应的 streamNACK在group总的位置，如果存在，还需要根据streamNACK 找到这条消息所处理的客户端的pel列表，从哪里买删掉
         streamNACK *nack = raxFind(group->pel,buf,sizeof(buf));
         if (nack != raxNotFound) {
             raxRemove(group->pel,buf,sizeof(buf),NULL);
@@ -2123,6 +2156,7 @@ void xclaimCommand(client *c) {
  * of items actaully deleted, that may be different from the number
  * of IDs passed in case certain IDs do not exist. */
 void xdelCommand(client *c) {
+	//杀出某个key的某些ID
     robj *o;
 
     if ((o = lookupKeyWriteOrReply(c,c->argv[1],shared.czero)) == NULL
@@ -2141,6 +2175,7 @@ void xdelCommand(client *c) {
     int deleted = 0;
     for (int j = 2; j < c->argc; j++) {
         streamParseIDOrReply(c,c->argv[j],&id,0); /* Retval already checked. */
+		//依次调用streamDeleteItem 来删除某个id的消息
         deleted += streamDeleteItem(s,&id);
     }
     signalModifiedKey(c->db,c->argv[1]);
@@ -2173,6 +2208,7 @@ void xtrimCommand(client *c) {
     /* Argument parsing. */
     int trim_strategy = TRIM_STRATEGY_NONE;
     long long maxlen = 0;   /* 0 means no maximum length. */
+	//由于rax树的特点，指定了 这个参数~的话，就尽量只删除整个节点，不真的删除那么多, 为了性能
     int approx_maxlen = 0;  /* If 1 only delete whole radix tree nodes, so
                                the maxium length is not applied verbatim. */
 
@@ -2186,7 +2222,7 @@ void xtrimCommand(client *c) {
             char *next = c->argv[i+1]->ptr;
             /* Check for the form MAXLEN ~ <count>. */
             if (moreargs >= 2 && next[0] == '~' && next[1] == '\0') {
-                approx_maxlen = 1;
+                approx_maxlen = 1; //近似删除, 为了性能
                 i++;
             }
             if (getLongLongFromObjectOrReply(c,c->argv[i+1],&maxlen,NULL)
@@ -2203,6 +2239,7 @@ void xtrimCommand(client *c) {
     if (trim_strategy == TRIM_STRATEGY_MAXLEN) {
         deleted = streamTrimByLength(s,maxlen,approx_maxlen);
     } else {
+		//看着以后还会增加其他trim的策略了，预留的标志
         addReplyError(c,"XTRIM called without an option to trim the stream");
         return;
     }

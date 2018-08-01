@@ -14,7 +14,9 @@ typedef struct streamID {
 } streamID;
 
 typedef struct stream {
+	//rax树存储真正的消息内容
     rax *rax;               /* The radix tree holding the stream. */
+	//这个stream的消息长度
     uint64_t length;        /* Number of elements inside this stream. */
 	//当前stream的最后一个id
     streamID last_id;       /* Zero if there are yet no items. */
@@ -78,6 +80,7 @@ typedef struct streamConsumer {
     sds name;                   /* Consumer name. This is how the consumer
                                    will be identified in the consumer group
                                    protocol. Case sensitive. */
+	//待ACK的消息列表，注意这个功能streamCG 里面的实际上指向一个。也就是说一条消息，两个地方都会记住
     rax *pel;                   /* Consumer specific pending entries list: all
                                    the pending messages delivered to this
                                    consumer not yet acknowledged. Keys are
