@@ -661,7 +661,7 @@ typedef struct blockingState {
     robj *target;           /* The key that should receive the element,
                              * for BRPOPLPUSH. */
 
-    /* BLOCK_STREAM     size_t xread_count;     /* XREAD COUNT option. */
+    /* BLOCK_STREAM     size_t xread_count;      XREAD COUNT option. */
     size_t xread_count;     /* XREAD COUNT option. */
     robj *xread_group;      /* XREADGROUP group name. */
     robj *xread_consumer;   /* XREADGROUP consumer name. */

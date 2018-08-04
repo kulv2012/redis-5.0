@@ -1277,6 +1277,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
 
     /* Try to process pending commands for clients that were just unblocked. */
     if (listLength(server.unblocked_clients))
+		//处理一下哪些刚刚唤醒的，阻塞的客户端，因为他们可能在阻塞过程中给服务器发送了什么命令，当时没有立即执行。
         processUnblockedClients();
 
     /* Write the AOF buffer on disk */

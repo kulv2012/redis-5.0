@@ -129,8 +129,9 @@ int rdbSaveMillisecondTime(rio *rdb, long long t) {
 long long rdbLoadMillisecondTime(rio *rdb, int rdbver) {
     int64_t t64;
     rdbLoadRaw(rdb,&t64,8);
-    if (rdbver >= 9) /* Check the top comment of this function. */
+    if (rdbver >= 9){ /* Check the top comment of this function. */
         memrev64ifbe(&t64); /* Convert in big endian if the system is BE. */
+	}
     return (long long)t64;
 }
 

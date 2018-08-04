@@ -101,6 +101,8 @@ int getTimeoutFromObjectOrReply(client *c, robj *object, mstime_t *timeout, int 
  * and will be processed when the client is unblocked. */
 void blockClient(client *c, int btype) {
 	//将客户端设置为blocked状态，然后统计信息
+	//注意客户端可以等待多个key，但是不能同时等待多重类型的key， 
+	//因为btype只有一个, 并且processInputBuffer 也不会在block状态接受其他请求
     c->flags |= CLIENT_BLOCKED;
     c->btype = btype;//等在那种类型上面
     server.blocked_clients++;
@@ -155,6 +157,9 @@ void unblockClient(client *c) {
     c->btype = BLOCKED_NONE;
     /* The client may already be into the unblocked list because of a previous
      * blocking operation, don't add back it into the list multiple times. */
+	//等级一下这个客户端到 server.unblocked_clients 里面，这样在这次循环之前，会先处理一下这些客户端
+	//因为他们在阻塞的过程中可能给服务器发送了命令，当时没有处理。
+	//这个是 processUnblockedClients 负责的
     if (!(c->flags & CLIENT_UNBLOCKED)) {
         c->flags |= CLIENT_UNBLOCKED;
         listAddNodeTail(server.unblocked_clients,c);
@@ -225,17 +230,22 @@ void disconnectAllBlockedClients(void) {
  * be used only for a single type, like virtually any Redis application will
  * do, the function is already fair. */
 void handleClientsBlockedOnKeys(void) {
+	//processCommand() 里面调用call()处理结束后，判断ready_keys 调用这里来处理这条指令的block列表
+	//话说这里虽然用了list来传递数据，但其实还是阻塞的形式，要是异步的就好了
+	//对于等待在某个key的客户端列表，使用的是先进后出的优先顺序，当然stream会有group的逻辑在里面 
     while(listLength(server.ready_keys) != 0) {
+		//这个循环上面注释说了，为了避免BRPOPLPUSH 会再产生新的触发事件，所以得再次判断
         list *l;
 
         /* Point server.ready_keys to a fresh list and save the current one
          * locally. This way as we run the old list we are free to call
          * signalKeyAsReady() that may push new elements in server.ready_keys
          * when handling clients blocked into BRPOPLPUSH. */
+		//挪出来，以便新的二次触发事件放到ready_keys里面
         l = server.ready_keys;
         server.ready_keys = listCreate();
 
-        while(listLength(l) != 0) {
+        while(listLength(l) != 0) { //下面根据这个阻塞的key的类型来分别进行对应的处理
             listNode *ln = listFirst(l);
             readyList *rl = ln->value;
 
@@ -354,6 +364,8 @@ void handleClientsBlockedOnKeys(void) {
 
             /* Serve clients blocked on stream key. */
             else if (o != NULL && o->type == OBJ_STREAM) {
+				//处理stream类型的等待事件, 有客户端等在这上面 , 先取出在这个key上等待的客户端列表
+				//然后
                 dictEntry *de = dictFind(rl->db->blocking_keys,rl->key);
                 stream *s = o->ptr;
 
@@ -366,16 +378,22 @@ void handleClientsBlockedOnKeys(void) {
                     listIter li;
                     listRewind(clients,&li);
 
+					//下面循环所有等待的客户端列表，一个个判断他们是否跟当前key匹配，如果id等都合适，
+					//那么调用streamReplyWithRange 去扫描发送消息。同时，如果有多个consumer等待在一个key上的情况
+					//怎么处理呢? 不会发生重复吗? 答案当然不会，因为streamReplyWithRange每次回更新最大的last_id，
+					//然后下回进来的时候第二个消费者其实不会有什么实际的操作发生
                     while((ln = listNext(&li))) {
                         client *receiver = listNodeValue(ln);
+						//一个客户端可能block在多个key上? 是的
+						//每个客户端的bpop结构里面记录了我都阻塞在了哪些key里面
+						//但是，同时只能等待在某一类key上面，不能是多种。 因为blockClient 里面会重置btype, 且等待状态会拒绝其他请求
                         if (receiver->btype != BLOCKED_STREAM) continue;
-                        streamID *gt = dictFetchValue(receiver->bpop.keys,
-                                                      rl->key);
+						//从这个客户端的等待的key列表里面找到这个key，然后比较id是否有新的，如果有新的就发送数据并且解开等待状态
+                        streamID *gt = dictFetchValue(receiver->bpop.keys, rl->key);
                         if (s->last_id.ms > gt->ms ||
-                            (s->last_id.ms == gt->ms &&
-                             s->last_id.seq > gt->seq))
+                            (s->last_id.ms == gt->ms && s->last_id.seq > gt->seq))
                         {
-                            streamID start = *gt;
+                            streamID start = *gt;//这个客户端等待的开始ID
                             start.seq++; /* Can't overflow, it's an uint64_t */
 
                             /* If we blocked in the context of a consumer
@@ -383,9 +401,9 @@ void handleClientsBlockedOnKeys(void) {
                              * consumer here. */
                             streamCG *group = NULL;
                             streamConsumer *consumer = NULL;
+							//如果记录了group信息，那么查找一下这个group和consumer是不是存在
                             if (receiver->bpop.xread_group) {
-                                group = streamLookupCG(s,
-                                        receiver->bpop.xread_group->ptr);
+                                group = streamLookupCG(s, receiver->bpop.xread_group->ptr);
                                 /* In theory if the group is not found we
                                  * just perform the read without the group,
                                  * but actually when the group, or the key
@@ -394,9 +412,7 @@ void handleClientsBlockedOnKeys(void) {
                                  * and send them an error. */
                             }
                             if (group) {
-                                consumer = streamLookupConsumer(group,
-                                           receiver->bpop.xread_consumer->ptr,
-                                           1);
+                                consumer = streamLookupConsumer(group, receiver->bpop.xread_consumer->ptr, 1);
                             }
 
                             /* Emit the two elements sub-array consisting of
@@ -411,6 +427,7 @@ void handleClientsBlockedOnKeys(void) {
                                 rl->key,
                                 receiver->bpop.xread_group
                             };
+							//调用函数给这个group和consumer 发送指定位置的信息
                             streamReplyWithRange(receiver,s,&start,NULL,
                                                  receiver->bpop.xread_count,
                                                  0, group, consumer, 0, &pi);
@@ -419,6 +436,7 @@ void handleClientsBlockedOnKeys(void) {
                              * and other receiver->bpop stuff are no longer
                              * valid, so we must do the setup above before
                              * this call. */
+							//解锁客户端，这样会触发去处理这客户端阻塞期间的其他命令。也会从等待队列等数据中移除
                             unblockClient(receiver);
                         }
                     }
@@ -462,6 +480,7 @@ void handleClientsBlockedOnKeys(void) {
  * be unblocked only when items with an ID greater or equal to the specified
  * one is appended to the stream. */
 void blockForKeys(client *c, int btype, robj **keys, int numkeys, mstime_t timeout, robj *target, streamID *ids) {
+	//等待在参数keys列表下面，如果是stream，ids就是最小的id列表
     dictEntry *de;
     list *l;
     int j;
@@ -479,6 +498,7 @@ void blockForKeys(client *c, int btype, robj **keys, int numkeys, mstime_t timeo
          * is NULL for lists and sorted sets, or the stream ID for streams. */
         void *key_data = NULL;
         if (btype == BLOCKED_STREAM) {
+			//如果是stream需要记录等待的时候的最小id，比这小的不要
             key_data = zmalloc(sizeof(streamID));
             memcpy(key_data,ids+j,sizeof(streamID));
         }
@@ -562,6 +582,8 @@ void unblockClientWaitingData(client *c) {
  *
  * The list will be finally processed by handleClientsBlockedOnLists() */
 void signalKeyAsReady(redisDb *db, robj *key) {
+	//触发key的修改事件，这样在返回到call()外层，处理完这条命令后会检查server.ready_keys 列表是否为空
+	//调用handleClientsBlockedOnKeys 来处理后续的事情
     readyList *rl;
 
     /* No clients blocking for this key? No need to queue it. */
@@ -575,12 +597,17 @@ void signalKeyAsReady(redisDb *db, robj *key) {
     rl->key = key;
     rl->db = db;
     incrRefCount(key);
+	//加到server.ready_keys里面后，在本条语句执行完成后，也就是call()返回后，
+	//Redis就会检查列表是否为空如果不为空就说明有等待事件需要处理
+	//然后就会调用handleClientsBlockedOnKeys 来处理这些阻塞事件.所以其实还是同步的
     listAddNodeTail(server.ready_keys,rl);
 
     /* We also add the key in the db->ready_keys dictionary in order
      * to avoid adding it multiple times into a list with a simple O(1)
      * check. */
     incrRefCount(key);
+	//增加一个到db->ready_keys， 注意上面是到整个server级别的 list里面，下面是加到这个db的阻塞触发队列里面
+	//用来做
     serverAssert(dictAdd(db->ready_keys,key,NULL) == DICT_OK);
 }
 

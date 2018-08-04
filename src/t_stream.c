@@ -880,6 +880,7 @@ size_t streamReplyWithRange(client *c, stream *s, streamID *start, streamID *end
      * see the history of messages delivered to it and not yet confirmed
      * as delivered. */
     if (group && streamCompareID(start,&group->last_id) <= 0) {
+		//这是个旧id，那么从待完成队列里面去找一下消息然后触发他们，不能发错了
         return streamReplyWithRangeFromConsumerPEL(c,s,start,end,count,
                                                    consumer);
     }
@@ -892,6 +893,7 @@ size_t streamReplyWithRange(client *c, stream *s, streamID *start, streamID *end
     while(streamIteratorGetID(&si,&id,&numfields)) {
         /* Update the group last_id if needed. */
         if (group && streamCompareID(&id,&group->last_id) > 0)
+			//读取的消息带有groupname，那么更新一下最大的id，保证不重复投递
             group->last_id = id;
 
         /* Emit a two elements array for each item. The first is
@@ -976,7 +978,13 @@ size_t streamReplyWithRange(client *c, stream *s, streamID *start, streamID *end
  * seek into the radix tree of the messages in order to emit the full message
  * to the client. However clients only reach this code path when they are
  * fetching the history of already retrieved messages, which is rare. */
+//上面作者说这个函数很少进来，只有客户端获取旧id消息的时候调用。
+//但是还有一种情况，多个消费者等待同一个id的时候，除了第一个之外其他都会重复投递吧
+//然后这个函数进行重试的时候，就会将所有客户端全唤醒，返回空
 size_t streamReplyWithRangeFromConsumerPEL(client *c, stream *s, streamID *start, streamID *end, size_t count, streamConsumer *consumer) {
+	//streamReplyWithRange 调用这里，由于客户端要求的ID比group的最大id小
+	//为了避免一个ID发给多个人，所以这种时候调用这里来将这个consumer的待确认队列里面的内容全部发送出去
+	//什么意思呢？就当他要求重发他的历史数据了。
     raxIterator ri;
     unsigned char startkey[sizeof(streamID)];
     unsigned char endkey[sizeof(streamID)];
@@ -1195,7 +1203,7 @@ void xaddCommand(client *c) {
     /* We need to signal to blocked clients that there is new data on this
      * stream. */
 	//通知等待在这个key上面的客户端，给他们新的内容
-    if (server.blocked_clients_by_type[BLOCKED_STREAM])
+    if (server.blocked_clients_by_type[BLOCKED_STREAM]) ///在这个阻塞类型上阻塞的客户端数目，用来加速，没必要的就 不需要进去了
         signalKeyAsReady(c->db, c->argv[1]);
 }
 
@@ -1461,6 +1469,7 @@ void xreadCommand(client *c) {
         }
 		//登记这个客户端到每个等待的key的block列表里面 ， 
 		//等有新事件发生的时候，xadd会调用 signalKeyAsReady 来找一个对应的客户端然后通知他的
+		//如果有其他客户端需改对应的key，就会触发handleClientsBlockedOnKeys 函数进行处理
         blockForKeys(c, BLOCKED_STREAM, c->argv+streams_arg, streams_count, timeout, NULL, ids);
         /* If no COUNT is given and we block, set a relatively small count:
          * in case the ID provided is too low, we do not want the server to
@@ -1472,6 +1481,7 @@ void xreadCommand(client *c) {
          * keys receive more data, we can call streamReplyWithRange() passing
          * the right arguments. */
         if (groupname) {
+			//记录等待的group 名字和消费者名字，在 触发事件后，需要更新group的位置
             incrRefCount(groupname);
             incrRefCount(consumername);
             c->bpop.xread_group = groupname;
